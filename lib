@@ -1,0 +1,269 @@
+import { createClient } from '@supabase/supabase-js';
+import type {
+  StatsOverview,
+  EarningsPoint,
+  LecturePerformance,
+  Transaction,
+  WalletData,
+  WithdrawalRequest,
+  DateFilter,
+} from '@/types/analytics';
+
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+
+export const supabase = createClient(supabaseUrl, supabaseKey);
+
+export function getDateRange(filter: DateFilter): { from: string | null; to: string } {
+  const now = new Date();
+  const to = now.toISOString();
+  if (filter === 'all') return { from: null, to };
+  const days = filter === '7d' ? 7 : filter === '30d' ? 30 : 90;
+  const from = new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
+  return { from, to };
+}
+
+// ACTUAL COLUMN NAMES from purchases table:
+// id, user_id (student), teacher_id, lecture_id, type (buy/rent/free),
+// amount, payment_status, razorpay_payment_id, razorpay_order_id,
+// rent_expires_at, created_at, currency
+
+const TEACHER_SHARE = 0.9;
+const PLATFORM_SHARE = 0.1;
+
+export async function fetchStatsOverview(teacherId: string, filter: DateFilter): Promise<StatsOverview> {
+  const { from, to } = getDateRange(filter);
+
+  let query = supabase
+    .from('purchases')
+    .select('id, amount, type, user_id, created_at')
+    .eq('teacher_id', teacherId)
+    .eq('payment_status', 'success');
+  if (from) query = query.gte('created_at', from).lte('created_at', to);
+  const { data: purchases } = await query;
+
+  // Previous period comparison
+  let prevQuery = supabase
+    .from('purchases')
+    .select('id, amount, user_id')
+    .eq('teacher_id', teacherId)
+    .eq('payment_status', 'success');
+  if (from) {
+    const prevFrom = new Date(
+      new Date(from).getTime() - (new Date(to).getTime() - new Date(from).getTime())
+    ).toISOString();
+    prevQuery = prevQuery.gte('created_at', prevFrom).lt('created_at', from);
+  }
+  const { data: prevPurchases } = await prevQuery;
+
+  // Wallet se available/pending balance
+  const { data: wallet } = await supabase
+    .from('teacher_wallet')
+    .select('available_balance, pending_balance')
+    .eq('teacher_id', teacherId)
+    .single();
+
+  const TEACHER_SHARE = 0.9;
+
+  // Live calculate from purchases (wallet se nahi)
+  const totalEarnings = (purchases || []).reduce(
+    (s, p) => s + (p.amount || 0) * TEACHER_SHARE, 0
+  );
+  const prevEarnings = (prevPurchases || []).reduce(
+    (s, p) => s + (p.amount || 0) * TEACHER_SHARE, 0
+  );
+
+  const earningsChange = prevEarnings > 0
+    ? ((totalEarnings - prevEarnings) / prevEarnings) * 100 : 0;
+
+  const studentSet = new Set(
+    (purchases || [])
+      .filter((p: any) => p.user_id !== teacherId) // teacher khud exclude
+      .map((p: any) => p.user_id)
+  );
+  const prevStudentSet = new Set(
+    (prevPurchases || [])
+      .filter((p: any) => p.user_id !== teacherId)
+      .map((p: any) => p.user_id)
+  );
+  const studentsChange = prevStudentSet.size > 0
+    ? ((studentSet.size - prevStudentSet.size) / prevStudentSet.size) * 100 : 0;
+
+  return {
+    totalEarnings: Math.round(totalEarnings * 100) / 100,
+    availableBalance: wallet?.available_balance ?? 0,
+    pendingBalance: wallet?.pending_balance ?? 0,
+    totalStudents: studentSet.size,
+    totalSold: (purchases || []).filter((p: any) => p.type === 'buy').length,
+    totalRentals: (purchases || []).filter((p: any) => p.type === 'rent').length,
+    earningsChange: Math.round(earningsChange * 10) / 10,
+    studentsChange: Math.round(studentsChange * 10) / 10,
+  };
+}
+
+export async function fetchEarningsChart(teacherId: string, filter: DateFilter): Promise<EarningsPoint[]> {
+  const { from, to } = getDateRange(filter);
+
+  let query = supabase
+    .from('purchases')
+    .select('amount, created_at')
+    .eq('teacher_id', teacherId)
+    .eq('payment_status', 'success')
+    .order('created_at', { ascending: true });
+  if (from) query = query.gte('created_at', from).lte('created_at', to);
+  const { data } = await query;
+  if (!data) return [];
+
+  const grouped: Record<string, { earnings: number; sales: number }> = {};
+  for (const p of data) {
+    const d = new Date(p.created_at);
+    const key = filter === '7d' || filter === '30d'
+      ? d.toLocaleDateString('en-IN', { month: 'short', day: 'numeric' })
+      : d.toLocaleDateString('en-IN', { month: 'short', year: '2-digit' });
+    if (!grouped[key]) grouped[key] = { earnings: 0, sales: 0 };
+    grouped[key].earnings += (p.amount || 0) * TEACHER_SHARE;
+    grouped[key].sales += 1;
+  }
+
+  return Object.entries(grouped).map(([date, vals]) => ({
+    date,
+    earnings: Math.round(vals.earnings * 100) / 100,
+    sales: vals.sales,
+  }));
+}
+
+export async function fetchLecturePerformance(teacherId: string, filter: DateFilter): Promise<LecturePerformance[]> {
+  const { from, to } = getDateRange(filter);
+
+  const { data: lectures } = await supabase
+    .from('lectures')
+    .select('id, title, thumbnail_cid, price, pricing_model, currency')
+    .eq('user_id', teacherId);
+  if (!lectures || !lectures.length) return [];
+
+  const lectureIds = lectures.map((l: any) => l.id);
+
+  let purchaseQuery = supabase
+    .from('purchases')
+    .select('lecture_id, amount, type, user_id')
+    .eq('teacher_id', teacherId)
+    .eq('payment_status', 'success')
+    .in('lecture_id', lectureIds);
+  if (from) purchaseQuery = purchaseQuery.gte('created_at', from).lte('created_at', to);
+  const { data: purchases } = await purchaseQuery;
+
+  return lectures.map((lec: any) => {
+    const lPurchases = (purchases || []).filter((p: any) => p.lecture_id === lec.id);
+    const totalRevenue = lPurchases.reduce((s: number, p: any) => s + (p.amount || 0) * TEACHER_SHARE, 0);
+    const rentCount = lPurchases.filter((p: any) => p.type === 'rent').length;
+    const buyCount = lPurchases.filter((p: any) => p.type === 'buy').length;
+    const studentsEnrolled = new Set(lPurchases.map((p: any) => p.user_id)).size;
+
+    return {
+      id: lec.id,
+      title: lec.title,
+      thumbnail: lec.thumbnail_cid ? `https://gateway.pinata.cloud/ipfs/${lec.thumbnail_cid}` : '',
+      price: lec.price || 0,
+      pricingModel: lec.pricing_model,
+      currency: lec.currency,
+      totalSales: lPurchases.length,
+      totalRevenue: Math.round(totalRevenue * 100) / 100,
+      rentCount,
+      buyCount,
+      studentsEnrolled,
+      views: 0,
+      conversionRate: 0,
+    } as LecturePerformance;
+  }).sort((a, b) => b.totalRevenue - a.totalRevenue);
+}
+
+export async function fetchRecentTransactions(teacherId: string, limit = 10): Promise<Transaction[]> {
+  const { data } = await supabase
+    .from('purchases')
+    .select(`id, amount, type, payment_status, razorpay_payment_id, created_at, lecture_id, user_id, lectures(title, thumbnail_cid)`)
+    .eq('teacher_id', teacherId)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (!data) return [];
+
+  const userIds = [...new Set(data.map((p: any) => p.user_id).filter(Boolean))];
+  let profileMap: Record<string, { full_name: string; email: string }> = {};
+
+  if (userIds.length > 0) {
+    const { data: profiles } = await supabase
+      .from('profiles')
+      .select('id, full_name, email')
+      .in('id', userIds);
+    (profiles || []).forEach((p: any) => {
+      profileMap[p.id] = { full_name: p.full_name, email: p.email };
+    });
+  }
+
+  return data.map((p: any) => ({
+    id: p.id,
+    studentName: profileMap[p.user_id]?.full_name || 'Student',
+    studentEmail: profileMap[p.user_id]?.email || '',
+    lectureTitle: (p.lectures as any)?.title || 'Lecture',
+    lectureThumbnail: (p.lectures as any)?.thumbnail_cid
+      ? `https://gateway.pinata.cloud/ipfs/${(p.lectures as any).thumbnail_cid}` : '',
+    amount: p.amount || 0,
+    platformFee: Math.round((p.amount || 0) * PLATFORM_SHARE * 100) / 100,
+    teacherEarning: Math.round((p.amount || 0) * TEACHER_SHARE * 100) / 100,
+    date: p.created_at,
+    paymentId: p.razorpay_payment_id || '',
+    type: p.type,
+    status: p.payment_status,
+  }));
+}
+
+export async function fetchWalletData(teacherId: string): Promise<WalletData> {
+  const { data } = await supabase
+    .from('teacher_wallet')
+    .select('total_earnings, available_balance, pending_balance, withdrawn_amount')
+    .eq('teacher_id', teacherId)
+    .single();
+
+  return {
+    totalEarnings: data?.total_earnings ?? 0,
+    availableBalance: data?.available_balance ?? 0,
+    pendingBalance: data?.pending_balance ?? 0,
+    totalWithdrawn: data?.withdrawn_amount ?? 0,
+  };
+}
+
+export async function fetchWithdrawalHistory(teacherId: string): Promise<WithdrawalRequest[]> {
+  const { data } = await supabase
+    .from('withdrawal_requests')
+    .select('id, amount, status, created_at, processed_at, notes')
+    .eq('teacher_id', teacherId)
+    .order('created_at', { ascending: false });
+
+  return (data || []).map((w: any) => ({
+    id: w.id,
+    amount: w.amount,
+    status: w.status,
+    createdAt: w.created_at,
+    processedAt: w.processed_at,
+    notes: w.notes,
+  }));
+}
+
+export async function requestWithdrawal(teacherId: string, amount: number): Promise<{ success: boolean; error?: string }> {
+  const wallet = await fetchWalletData(teacherId);
+  if (amount > wallet.availableBalance) return { success: false, error: 'Insufficient available balance' };
+  if (amount < 100) return { success: false, error: 'Minimum withdrawal amount is ₹100' };
+
+  const { error: insertError } = await supabase.from('withdrawal_requests').insert({
+    teacher_id: teacherId, amount, status: 'pending', created_at: new Date().toISOString(),
+  });
+  if (insertError) return { success: false, error: insertError.message };
+
+  const { error: walletError } = await supabase
+    .from('teacher_wallet')
+    .update({ available_balance: wallet.availableBalance - amount, pending_balance: wallet.pendingBalance + amount })
+    .eq('teacher_id', teacherId);
+  if (walletError) return { success: false, error: walletError.message };
+
+  return { success: true };
+}
