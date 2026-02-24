@@ -1,0 +1,207 @@
+"use client";
+
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { createClient } from "@supabase/supabase-js";
+import {
+  LayoutDashboard,
+  ArrowLeftRight,
+  Wallet,
+  GraduationCap,
+  BookOpen,
+  BarChart3,
+  ChevronRight,
+  LogOut,
+  Search,
+  Filter,
+  CheckCircle,
+  XCircle,
+  Trash2,
+  TrendingUp,
+  Users,
+  BookMarked,
+  DollarSign,
+  Clock,
+  Star,
+  Menu,
+  Bell,
+  ChevronDown,
+} from "lucide-react";
+
+/* ────────────────────────────────────────────── */
+/* Supabase Client */
+/* ────────────────────────────────────────────── */
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
+
+/* ────────────────────────────────────────────── */
+/* Types */
+/* ────────────────────────────────────────────── */
+
+type Tab =
+  | "dashboard"
+  | "transactions"
+  | "withdrawals"
+  | "teachers"
+  | "lectures"
+  | "analytics";
+
+/* ────────────────────────────────────────────── */
+/* Sidebar Config */
+/* ────────────────────────────────────────────── */
+
+const NAV_ITEMS: { id: Tab; label: string; icon: React.ElementType }[] = [
+  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { id: "transactions", label: "Transactions", icon: ArrowLeftRight },
+  { id: "withdrawals", label: "Withdrawals", icon: Wallet },
+  { id: "teachers", label: "Teachers", icon: GraduationCap },
+  { id: "lectures", label: "Lectures", icon: BookOpen },
+  { id: "analytics", label: "Platform Analytics", icon: BarChart3 },
+];
+
+const TAB_TITLES: Record<Tab, string> = {
+  dashboard: "Admin Overview",
+  transactions: "All Transactions",
+  withdrawals: "Withdrawal Requests",
+  teachers: "Teacher Management",
+  lectures: "Lecture Management",
+  analytics: "Platform Analytics",
+};
+
+/* ────────────────────────────────────────────── */
+/* Main Admin Page */
+/* ────────────────────────────────────────────── */
+
+export default function AdminPage() {
+  const router = useRouter();
+  const [activeTab, setActiveTab] = useState<Tab>("dashboard");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [checkingAuth, setCheckingAuth] = useState(true);
+
+  /* ────────────────────────────────────────────── */
+  /* 🔐 ADMIN AUTH CHECK */
+  /* ────────────────────────────────────────────── */
+
+  useEffect(() => {
+    const checkAdmin = async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!user) {
+        router.replace("/login");
+        return;
+      }
+
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("id", user.id)
+        .single();
+
+      if (!profile || profile.role !== "admin") {
+        router.replace("/dashboard");
+        return;
+      }
+
+      setCheckingAuth(false);
+    };
+
+    checkAdmin();
+  }, [router]);
+
+  if (checkingAuth) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <p className="text-sm text-slate-500 font-medium">
+          Checking admin access...
+        </p>
+      </div>
+    );
+  }
+
+  /* ────────────────────────────────────────────── */
+  /* UI Rendering */
+  /* ────────────────────────────────────────────── */
+
+  const renderSection = () => {
+    return (
+      <div className="text-sm text-slate-500 font-medium">
+        Section content will be here.
+      </div>
+    );
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 font-sans flex">
+      {/* Sidebar */}
+      <aside
+        className={`fixed top-0 left-0 h-full w-64 bg-white border-r border-slate-100 shadow-xl z-40 flex flex-col transition-transform duration-300
+        ${sidebarOpen ? "translate-x-0" : "-translate-x-full"} lg:translate-x-0`}
+      >
+        <div className="px-5 py-6 border-b border-slate-100">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-600 to-indigo-600 flex items-center justify-center">
+              <Star className="w-4 h-4 text-white fill-white" />
+            </div>
+            <div>
+              <p className="text-sm font-bold text-slate-800">EduAdmin</p>
+              <p className="text-[10px] text-slate-400">Control Panel</p>
+            </div>
+          </div>
+        </div>
+
+        <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
+          {NAV_ITEMS.map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              onClick={() => setActiveTab(id)}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all
+              ${
+                activeTab === id
+                  ? "bg-violet-600 text-white"
+                  : "text-slate-500 hover:bg-slate-50"
+              }`}
+            >
+              <Icon className="w-4 h-4" />
+              {label}
+              {activeTab === id && (
+                <ChevronRight className="w-3.5 h-3.5 ml-auto" />
+              )}
+            </button>
+          ))}
+        </nav>
+      </aside>
+
+      {/* Main */}
+      <div className="flex-1 flex flex-col min-h-screen lg:ml-64">
+        <header className="sticky top-0 z-20 bg-white border-b border-slate-100 px-6 py-4 flex justify-between items-center">
+          <h1 className="text-base font-bold text-slate-800">
+            {TAB_TITLES[activeTab]}
+          </h1>
+
+          <div className="flex items-center gap-3">
+            <div className="px-3 py-1 bg-violet-50 text-violet-700 text-xs font-semibold rounded-xl">
+              Admin
+            </div>
+            <button
+              onClick={async () => {
+                await supabase.auth.signOut();
+                router.push("/login");
+              }}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-medium text-slate-600 hover:bg-slate-50"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              Logout
+            </button>
+          </div>
+        </header>
+
+        <main className="flex-1 px-6 py-6">{renderSection()}</main>
+      </div>
+    </div>
+  );
+}
